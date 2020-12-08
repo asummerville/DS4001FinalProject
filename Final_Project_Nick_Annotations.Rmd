@@ -1,0 +1,1254 @@
+---
+title: "DS 4001 Final Project - Spotify Popularity"
+author: "Aatmika Deshpande, Alden Summerville, Nick Kalinowski"
+date: "12/6/2020"
+output: 
+   #prettydoc::html_pretty:
+    #theme: architect
+    #highlight: github
+    #toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(DT)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(pROC)
+library(randomForest)
+library(plotly)
+library(kableExtra)
+library(rio)
+library(ROCR)
+library(class)
+library(gmodels)
+
+```
+
+## Objective and Background Information 
+
+The purpose of this project is to examine what characteristics/variables make a given song "popular", and to create an algorithm that can predict whether a song will be popular or not. This algorithm could be used in many ways, such as determining which songs an artist should release if the primary goal is to release a popular song---this could be very useful for record labels trying to release hit songs.
+
+### Dataset
+
+The dataset used comprises of around 170,000 songs on Spotify from 1970-2020 and was updated 11 days ago (11/25/2020). This [article](https://towardsdatascience.com/what-makes-a-song-likeable-dbfdb7abe404) does a great job of explaining the various "audio features" that Spotify links to a song. Here are the first couple songs in the dataset as a reference:
+
+```{r, echo=FALSE}
+
+spotify = read.csv("spotify_data_popularity.csv")
+#view(spotify)
+
+datatable(head(spotify))
+
+```
+
+Our target variable is the "popularity" variable, but because it is a range from 0-100 (as seen below), we'll make it a binary variable with a popularity >= 50 being a "popular" song, and < 50 being a "not popular" song. 
+
+```{r, echo=FALSE}
+
+pop.mat <- as.matrix(summary(spotify$popularity))
+colnames(pop.mat) = "Value"
+datatable(pop.mat)
+
+```
+
+Of course, there is no set cutoff for what would make a song "popular", however, about 20% of the songs have a popularity >= 50 so that appears to be a fair cutoff. Likewise, the popularity variable is based on the amount of *recent* plays of a given song, so typically more recent songs will be more popular. Therefore, our analysis will reveal what qualities/variables make a song popular *now* in time, which would definitely be of more use to a record label/artist than popularity data from the past as trends in music change every year.
+
+### Questions
+
+  - What factors contribute to making a song popular
+  
+  - Do songs with explicit content have other similar factors
+    helps with families and parents 
+    
+  - Do certain factors make a song more or less valence (>=.6 happy, .4<neutral<.6, <=.4 sad/angry)
+  
+  - Popularity has much to do with energy and danceability, with current waves of tiktok and such, does not take much to be popular, just need to be discovered and have the right aspects
+
+### Purpose for Exploration
+
+  - Looking at popularity would be good to see the current cultural trends of the US
+  
+  - Helpful when composing music to see what factors play heavily into popularity
+  
+  - A reference for comparison can be found [here](https://towardsdatascience.com/whats-popping-an-exploratory-analytics-project-on-what-makes-popular-music-popular-7b183e6e48d2) and conducts a similar analysis of popularity on Spotify songs
+
+### Methods being Used 
+
+We decided to use decision trees and random forests due to their advantages in comprehension, little data preparation, and ability to handle numerical and categorical data.
+
+## What Factors Contribute to the Popularity of a Song at the End of 2020?
+
+The first analysis we'll conduct is building a decision tree and a random forest to try and predict if a song will be popular and what factors most impact popularity. We'll also filter the data to only include songs from the 1970s or later, as those are the songs relevant to the analysis.
+
+### Cleaning the Data
+
+First some data cleaning is necessary before building the models. The primary tasks are factoring/refactoring certain variables and creating thresholds to make binary or factorable variables.
+
+```{r, echo=FALSE}
+#make explicit, mode, key a factor
+#refactor key to be the name of the key
+#make binary popularity variable (>=50 is 1, 0 otherwise)
+#make decade variable from song date
+#make valence variable as a factor (>=.6 is happy/delighted, .3<neutral<.6, <=.3 sad/angry)
+#filter starting from 1970s
+spotify$explicit <- factor(spotify$explicit, labels = c("no explicit", "explicit"))
+spotify$mode <- factor(spotify$mode,labels = c("minor", "major"))
+spotify$key <- factor(spotify$key,labels = c("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#",
+                                             "A", "A#", "B"))
+spotify$is_popular = ifelse(spotify$popularity>=50, "popular", "not popular")
+spotify$decade = case_when(spotify$year <= 1929 ~ "1920s",
+                           spotify$year>=1930 & spotify$year<=1939 ~ "1930s",
+                           spotify$year>=1940 & spotify$year<=1949 ~ "1940s",
+                           spotify$year>=1950 & spotify$year<=1959 ~ "1950s",
+                           spotify$year>=1960 & spotify$year<=1969 ~ "1960s",
+                           spotify$year>=1970 & spotify$year<=1979 ~ "1970s",
+                           spotify$year>=1980 & spotify$year<=1989 ~ "1980s",
+                           spotify$year>=1990 & spotify$year<=1999 ~ "1990s",
+                           spotify$year>=2000 & spotify$year<=2009 ~ "2000s",
+                           spotify$year>=2010 & spotify$year<=2019 ~ "2010s",
+                           spotify$year==2020 ~ "2020")
+spotify = spotify %>% filter(decade %in% c("1970s", "1980s", "1990s", "2000s", "2010s", "2020"))
+spotify$decade = as.factor(spotify$decade)
+spotify$is_popular = as.factor(spotify$is_popular)
+spotify$valence_fact = case_when(spotify$valence <= .3 ~ "sad/depressed",
+                                 spotify$valence >.3 & spotify$valence < .6 ~ "neutral",
+                                 spotify$valence >= .6 ~ "happy/cheerful")
+spotify$valence_fact = as.factor(spotify$valence_fact)
+#not using variables year, artists, id, name, release_date
+spotify2 = spotify[, -c(2, 4, 9, 15, 17)]
+#view(spotify2)
+
+```
+
+### Exploratory Analysis
+
+#### Summary Statistics
+
+Below are some relevant statistics regarding the popularity target variable:
+
+```{r, echo=FALSE}
+#number of popular vs unpopular
+datatable(as.matrix(table(spotify2$is_popular)))
+
+#base rate: 36.90%, classify above this
+#(sum(spotify2$is_popular=="popular")/length(spotify2$is_popular))*100
+
+#number of songs in dataset from each decade
+datatable(as.matrix(table(spotify2$decade)))
+
+#number of popular vs unpopular based off 11 days ago separately by decade song is from
+datatable(spotify2 %>% group_by(decade) %>% summarise(percent_popular =
+                                              round(sum(is_popular=="popular")/n(),4)*100))
+```
+
+Therefore, the base rate of the data is 36.90% and we can also view the breakup of how many songs fall into each decade. The majority are earlier than 2020 which would make sense as a decade consists of 10 years opposed to just 2020. We can also look at the percent of songs that were popular in each decade, and as one might expect there is a constant increase in popularity as time persists, with about 85% of the songs from 2020 being popular.
+
+#### Data Visualizations
+
+```{r, echo=FALSE}
+#NEED TO ADD TITLES TO THESE THINGS
+
+#boxplot popular vs danceability
+ggplot(spotify2, aes(x=is_popular, y=danceability)) + geom_boxplot() + ggtitle("Danceability vs Popularity")
+
+#boxplot popular vs energy
+ggplot(spotify2, aes(x=is_popular, y=energy)) + geom_boxplot() + ggtitle("Energy vs Popularity")
+
+#boxplot popular vs valence, not much difference
+ggplot(spotify2, aes(x=is_popular, y=valence)) + geom_boxplot() + ggtitle("Valence vs Popularity")
+
+#more prevalent mode split by popular and not
+ggplot(spotify2, aes(x=is_popular, fill=mode)) + geom_bar(position = position_dodge()) + ggtitle("Musical Scale vs Popularity")
+```
+
+
+
+#### Hypothesis on Important Variables
+
+Based on the above visualizations, we can initially hypothesize that songs that are easier to dance to, have more energy, and have a major scale will be more popular. It is interesting that the spread of the valence for popular vs non popular songs are similar, as we would've expected happier songs (higher valence) to be more popular. Furthermore, based on the analysis above I would expect the decade to be very important because more recent songs are more popular. Now we'll build our models.
+
+### Decision Tree
+
+Model output:
+
+```{r, echo=FALSE}
+
+#not using popularity or valence_fact in the data for this tree, repetitive columns
+#decade might be unnecessary
+popular_dataset = spotify2[,-c(12, 17)]
+set.seed(10271999)
+popular_tree_gini = rpart(is_popular~.,  #<- formula, response variable ~ predictors
+                           #   "." means "use all other variables in data"
+                            method = "class",#<- specify method, use "class" for tree
+                            parms = list(split = "gini"),#<- method for choosing tree split
+                            data = popular_dataset,#<- data used
+                            control = rpart.control(cp=.01))
+#Look at the results
+popular_tree_gini
+popular_tree_gini$variable.importance
+```
+
+PLOTTED TREE
+
+```{r, echo=FALSE}
+rpart.plot(popular_tree_gini, type =4, extra = 101)
+```
+
+PLOTTED CP
+
+```{r, echo=FALSE}
+plotcp(popular_tree_gini, upper="splits") #5 splits ideal?
+```
+
+CP TABLE
+
+```{r, echo=FALSE}
+#the lowest level where the rel_error + xstd < xerror**. For this tree, based on the generated table, this would be at a level of 1 split.
+cptable_popular <- as.data.frame(popular_tree_gini$cptable, )
+cptable_popular$opt <- cptable_popular$`rel error`+ cptable_popular$xstd
+kable(cptable_popular) #5 to 6 splits ideal
+ 
+```
+
+#### Evaluating Model
+
+##### Predicting Values
+
+PREDICTIVE MODEL
+
+```{r, echo=FALSE}
+popular_fitted_model = predict(popular_tree_gini, type= "class")
+```
+
+ACTUAL SPLIT
+```{r, echo=FALSE}
+table(popular_dataset$is_popular)
+```
+
+PREDICTED SPLIT
+```{r, echo=FALSE}
+table(popular_fitted_model)
+```
+
+CONFUSION MATRIX
+```{r, echo=FALSE}
+popular_conf_matrix = confusionMatrix(as.factor(popular_fitted_model), as.factor(popular_dataset$is_popular), positive = "popular", dnn=c("Prediction", "Actual"), mode = "sens_spec")
+popular_conf_matrix
+#TP/(TP + FP)
+prec = 11601/(11601+ 6798)
+recall =  0.3106
+f1 = 2*(prec*recall/(prec+recall)) #0.4161847
+#DETECTION AND ERROR RATE
+popular_error_rate = (6798+25745) / (6798+25745+57057+11601) #32.1568%
+#Detection Rate is the rate at which the algo detects the possitive class in proportion to the entire classification A/(A+B+C+D) where A is poss poss
+popular_detection_rate = 11601/(6798+25745+57057+11601) #11.463%
+#perfect classifier would have detection rate of 
+sum(popular_dataset$is_popular=="popular")/length(popular_dataset$is_popular) #36.90%
+```
+
+####ROC
+
+```{r, echo=FALSE}
+popular_roc <- roc(popular_dataset$is_popular, as.numeric(popular_fitted_model), plot = TRUE) #Building the evaluation ROC and AUV using the predicted and original target vairables 
+popular_roc #AUC = .6021
+```
+
+#### Changing thresholds
+```{r, echo=FALSE}
+popular_fitted_prob = predict(popular_tree_gini, type= "prob")
+adjust_thres_popular <- function(x, y, z) {
+  #x=pred_probablities, y=threshold, z=test_outcome
+  thres <- as.factor(ifelse(x > y, "popular","not popular"))
+  confusionMatrix(thres, z, positive = "popular", dnn=c("Prediction", "Actual"), mode = "everything")
+}
+adjust_thres_popular(popular_fitted_prob[,'popular'], .5, as.factor(popular_dataset$is_popular))
+threshold = c(.2, .4, .5, .6)
+accuracy = c(0.369, 0.6268, 0.6784, 0.656)
+tpr = c(1.0000, 0.6529,0.3106, 0.12307)
+fpr = c(1-0, 1-0.6114, 1-0.8935, 1-0.96763)
+kappa = c(0, 0.248, 0.2282,0.1093)
+f1 = c(0.5391, 0.5635,0.4162, 0.20887)
+popular_thresholds = cbind(threshold, accuracy, tpr, fpr, kappa, f1)
+kable(as.data.frame(popular_thresholds))
+```
+
+
+### Random Forest
+
+#### Testing and Training Data
+
+The dataset will be split 90/10 training and testing.
+
+```{r, echo=FALSE}
+sample_rows = 1:nrow(popular_dataset)
+set.seed(10271999) #sample(x, size, replace = FALSE, prob = NULL)
+test_rows = sample(sample_rows,
+                   dim(popular_dataset)[1]*.10, #start with 10% of our dataset, could do 20%
+                   # but random forest does require more training data because of the 
+                   # sampling so 90% might be a better approach with this small of a dataset
+                   replace = FALSE)# We don't want duplicate samples
+popular_train = popular_dataset[-test_rows,]
+popular_test = popular_dataset[test_rows,]
+```
+
+#### Mtry level
+
+The Mtry level is the number of variables randomly sampled as candidates at each split. The default number for classification is sqrt(# of variables).
+
+```{r, echo=FALSE}
+#general rule to start with the mytry value is square root of the predictors
+mytry_tune <- function(x){
+  xx <- dim(x)[2]-1
+  sqrt(xx)
+}
+       
+mytry_tune(popular_dataset) #3.6, round to 4
+```
+
+#### Random Forest - 500 Trees
+
+Initially, we will be generating a random forest made up of 500 trees, and an mtry of 4. In order to ensure that these trees are not all identical and have the opporunity to specialize in different subsets of the data, we will set the argument of replace to TRUE.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+set.seed(10271999)	
+popular_RF_500 = randomForest(is_popular~.,          
+                            popular_train,     
+                            ntree = 500,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 4,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            #proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = TRUE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+#popular_RF_500
+```
+
+#### Evaluating Model
+
+ACCURACY
+
+```{r, echo=FALSE}
+popular_RF_500_acc = sum(popular_RF_500$confusion[row(popular_RF_500$confusion) == 
+                                                col(popular_RF_500$confusion)]) / 
+  sum(popular_RF_500$confusion)
+#0.7063657
+```
+
+ACTUAL AND PREDICTED
+
+```{r, echo=FALSE}
+table(popular_train$is_popular)
+table(popular_RF_500$predicted)
+```
+
+IMPORTANT VARIABLES
+
+```{r, echo=FALSE}
+kable(as.data.frame(popular_RF_500$importance))
+varImpPlot(popular_RF_500,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for If a Song is Popular, 500 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+```
+
+DATA VISUALIZATION
+
+```{r, echo=FALSE}
+popular_RF_500_error = data.frame(1:nrow(popular_RF_500$err.rate),
+                                popular_RF_500$err.rate)
+colnames(popular_RF_500_error) = c("Number of Trees", "Out of the Box",
+                                 "not popular", "popular")
+popular_RF_500_error$Diff <- popular_RF_500_error$popular-popular_RF_500_error$`not popular`
+datatable(popular_RF_500_error)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#diff measure is diff between popular and not popular 
+#x is number of trees
+#y is oob error
+fig <- plot_ly(x=popular_RF_500_error$`Number of Trees`, y=popular_RF_500_error$Diff,name="Diff", type = 'scatter', mode = 'lines')
+fig <- fig %>% add_trace(y=popular_RF_500_error$`Out of the Box`, name="OOB_Er")
+fig <- fig %>% add_trace(y=popular_RF_500_error$`not popular`, name="not popular")
+fig <- fig %>% add_trace(y=popular_RF_500_error$popular, name="popular")
+fig
+```
+
+CONFUSION MATRIX
+
+```{r, echo=FALSE}
+popular_RF_500$confusion
+```
+
+ERROR TABLE
+
+```{r, echo=FALSE}
+datatable(popular_RF_500_error)
+err.rate <- as.data.frame(popular_RF_500$err.rate)
+datatable(err.rate)
+```
+
+#### 131 Trees, Lowest Popular Error
+
+```{r, echo=FALSE}
+set.seed(10271999)	
+popular_RF_131 = randomForest(is_popular~.,          
+                            popular_train,     
+                            ntree = 131,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 4,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = TRUE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+popular_RF_131
+```
+
+
+
+```{r, echo=FALSE}
+popular_RF_131_acc = sum(popular_RF_131$confusion[row(popular_RF_131$confusion) == 
+                                                col(popular_RF_131$confusion)]) / 
+  sum(popular_RF_131$confusion)
+#0.7045322
+```
+
+#### Comparing Random Forests
+
+
+```{r, echo=FALSE}
+table(popular_train$is_popular)
+table(popular_RF_500$predicted)
+table(popular_RF_131$predicted)
+```
+
+Both variable importance plots are displayed, the first for the 1000 tree model, the second for the 399 tree model. 
+
+```{r, echo=FALSE}
+varImpPlot(popular_RF_500,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for a Popular Song, 500 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+varImpPlot(popular_RF_131,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for a Popular Song, 131 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+```
+
+VISUALIZATION OF ERROR 131
+
+```{r, echo=FALSE}
+popular_RF_131_error = data.frame(1:nrow(popular_RF_131$err.rate),
+                                popular_RF_131$err.rate)
+colnames(popular_RF_131_error) = c("Number of Trees", "Out of the Box",
+                                 "not popular", "popular")
+popular_RF_131_error$Diff <- popular_RF_131_error$popular-popular_RF_131_error$`not popular`
+fig2 <- plot_ly(x=popular_RF_131_error$`Number of Trees`, y=popular_RF_131_error$Diff,name="Diff", type = 'scatter', mode = 'lines')
+fig2 <- fig2 %>% add_trace(y=popular_RF_131_error$`Out of the Box`, name="OOB_Er")
+fig2 <- fig2 %>% add_trace(y=popular_RF_131_error$`not popular`, name="not popular")
+fig2 <- fig2 %>% add_trace(y=popular_RF_131_error$popular, name="popular")
+fig2
+```
+
+CONFUSION MATRICES
+
+A confusion matrix for the 500 trees is displayed first, then one for 131 trees.
+
+```{r, echo=FALSE}
+popular_RF_500$confusion
+popular_RF_131$confusion
+```
+
+#### Predictions on Test Data
+
+WITH 131 TREES
+
+```{r, echo=FALSE}
+popular_predict = predict(popular_RF_131,      #<- a randomForest model
+                            popular_test,      #<- the test data set to use
+                            type = "response",   #<- what results to produce, see the help menu for the options
+                            predict.all = TRUE,  #<- should the predictions of all trees be kept?
+                            proximity = TRUE)    #<- should proximity measures be computed
+#=================================================================================
+#### Error rate on the test set ####
+# Let's create a summary data frame, basically adding the prediction to the test set. 
+popular_test_pred = data.frame(popular_test, 
+                                 Prediction = popular_predict$predicted$aggregate)
+confusionMatrix(popular_test_pred$Prediction,popular_test_pred$is_popular,positive = "popular", 
+                dnn=c("Prediction", "Actual"), mode = "everything")
+```
+
+#### Tuning Model
+
+Using the tuneRf function, we are now checking for the optimal number of variables to use/test during the tree building process. 
+```{r, echo=FALSE}
+popular_RF_mtry = tuneRF(popular_train[ ,1:13], 
+                           as.factor(popular_train$is_popular),  
+                           mtryStart = 5,                        
+                           ntreeTry = 131,                       
+                           stepFactor = 2,                       
+                           improve = 0.05,                       
+                           trace = FALSE,                        
+                           plot = FALSE,                         
+                           doBest = FALSE)                       
+popular_RF_mtry #move down 1 variable but not a super large OOB error difference so not going to change it
+```
+
+#### Random Forest - 131 trees, mtry = 5
+
+```{r, echo=FALSE}
+set.seed(10271999)	
+popular_RF_131_2 = randomForest(is_popular~.,          
+                            popular_train,     
+                            ntree = 131,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 5,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = TRUE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+popular_RF_131_2
+```
+
+ACCURACY & CLASS ERROR
+
+```{r, echo=FALSE}
+popular_RF_131_2_acc = sum(popular_RF_131_2$confusion[row(popular_RF_131_2$confusion) == 
+                                                col(popular_RF_131_2$confusion)]) / 
+  sum(popular_RF_131_2$confusion)
+#0.7020179
+popular_RF_131_2$confusion
+```
+
+ROC FOR 131 TREES, 4 MTRY
+
+```{r, echo=FALSE}
+# First, create a prediction object for the ROC curve.
+# Take a look at the "votes" element from our randomForest function.
+# The "1" column tells us what percent of the trees voted for 
+# that data point as "pregnant". Let's convert this data set into a
+# data frame with numbers so we could work with it.
+popular_RF_131_prediction = as.data.frame(as.numeric(as.character(popular_RF_131$votes[,2])))
+#View(census_RF_500_2_prediction)
+# Let's also take the actual classification of each data point and convert
+# it to a data frame with numbers. R classifies a point in either bucket 
+# at a 50% threshold.
+popular_train_actual = data.frame(as.factor(popular_train$is_popular))
+#View(pregnancy_train_actual)
+#==================================================================================
+####  Tuning the model: the ROC curve ####
+# The prediction() function from the ROCR package will transform the data
+# into a standardized format for true positives and false positives.
+popular_prediction_comparison = prediction(popular_RF_131_prediction,           #<- a list or data frame with model predictions
+                                             popular_train_actual)#<- a list or data frame with actual class assignments
+#View(census_prediction_comparison)
+#actual values and predictions
+#==================================================================================
+#### Tuning the model: the ROC curve ####
+# Create a performance object for ROC curve where:
+# tpr = true positive rate.
+# fpr = fale positive rate.
+popular_pred_performance = performance(popular_prediction_comparison, 
+                                         measure = "tpr",    #<- performance measure to use for the evaluation
+                                         x.measure = "fpr")  #<- 2nd performance measure to use for the evaluation
+#View(census_pred_performance)
+#### Tuning the model: the ROC curve ####
+# The performance() function saves us a lot of time, and can be used directly
+# to plot the ROC curve.
+plot(popular_pred_performance, 
+     col = "red", 
+     lwd = 3, 
+     main = "ROC curve")
+grid(col = "black")
+# Add a 45 degree line.
+#abline(a = 0, 
+       #b = 1,
+       #lwd = 2,
+       #lty = 2,
+       #col = "gray")
+#==================================================================================
+#### Tuning the model: the ROC curve ####
+# Calculate the area under curve (AUC), which can help you compare the 
+# ROC curves of different models for their relative accuracy.
+popular_auc_RF = performance(popular_prediction_comparison, 
+                               "auc")@y.values[[1]]
+#AUC IS 0.7248817
+```
+
+### Conclusions
+
+
+## Do Songs with Explicit Content Generally Sound the Same?
+
+For the second part of our project, we hope to explore just the songs labeled as having explicit content. We will consider several metrics given in the dataset to judge whether or not these songs "sound" similar. These factors will include energy, valence, danceability, popularity, and "speechiness"
+
+### Exploratory Analysis
+
+We will first look at the songs classified as explicit (using spotify2$explicit to pull the data), and collect some basic summary statistics about the 
+
+#### Summary Statistics
+
+```{r, echo=FALSE}
+#number of explicit vs not explicit
+table(spotify2$explicit)
+#base rate: 11.77%, classify above this
+(sum(spotify2$explicit=="explicit")/length(spotify2$explicit))*100
+#number of explicit vs not explicit separately by decade song is from
+kable(spotify2 %>% group_by(decade) %>% summarise(percent_explicit =
+                                              round(sum(explicit=="explicit")/n(),4)*100))
+```
+From this table, we can see that the vast majority of explicit songs have come from the current decade (49% in the 2020s), and decreased progressively as we go further into the past. Now, let's look at some data visualizations comparing the explicit songs to the factors listed in the aforementioned section. 
+
+#### Data Visualizations
+
+```{r, echo=FALSE}
+#NEED TO ADD TITLES TO THESE THINGS
+#boxplot explicit vs danceability
+ggplot(spotify2, aes(x=explicit, y=danceability)) + geom_boxplot()
+#boxplot explicit vs energy
+ggplot(spotify2, aes(x=explicit, y=energy)) + geom_boxplot()
+#boxplot explicit vs valence, not much difference
+ggplot(spotify2, aes(x=explicit, y=valence)) + geom_boxplot()
+#boxplot explicit vs popularity score
+ggplot(spotify2, aes(x=explicit, y=popularity)) + geom_boxplot()
+#boxplot explicit vs speechiness score
+ggplot(spotify2, aes(x=explicit, y=speechiness)) + geom_boxplot()
+#more prevalent key
+ggplot(spotify2, aes(x=key, fill=explicit)) + geom_bar(position=position_dodge())
+#number of explicit songs by decade
+ggplot(spotify2, aes(x=decade, fill=explicit)) + geom_bar(position=position_dodge())
+```
+
+The first box plot compares non-explicit and explicit songs by the danceability rating provided by Spotify. Explict songs seem to have a slight edge in this metric, although there are an overall smaller number of songs in this category. Likewise, explicit songs seem to have a slightly higher mean in the "energy" metric as well, while non-explicit songs have higher valence. Explicit songs are almost 10 percentage points more popular on average than non-explicit music (around 55 percent to 45 for clean), and have a much higher speechiness value. 
+
+In terms of diversity of key selection, the distributions seem to be a bit different between the two categories, despite the vast difference in sample size. That being said, explicit songs tend to have more C# key, while clean music focuses more on C, D, G, and A keys. 
+
+The last bar graph illustrates the rise of the proportion of explicit songs in the entire population of the dataset as time progresses. This graph is a pictoral representation of the table we generated above.
+
+#### Selecting Important Variables
+
+Based off these graphs, I would hypothesize that key selection would be an important factor in distinguishing explicit and non-explicit songs. The C# key is far more prevalent in proportion to other keys in explicit music, while the C, D, G, and A appear more in clean music. Speechiness should also be important, given the large difference in the box plots.
+
+### Decision Tree
+```{r, echo=FALSE}
+#not using is_popular or valence_fact in the data for this tree, repetitive columns
+explicit_dataset = spotify2[,-c(15, 17)]
+set.seed(10271999)
+explicit_tree_gini = rpart(explicit~.,  #<- formula, response variable ~ predictors
+                           #   "." means "use all other variables in data"
+                            method = "class",#<- specify method, use "class" for tree
+                            parms = list(split = "gini"),#<- method for choosing tree split
+                            data = explicit_dataset,#<- data used
+                            control = rpart.control(cp=.01))
+#Look at the results
+explicit_tree_gini
+explicit_tree_gini$variable.importance
+```
+
+From these variable importance metrics, we can that speechiness, decade, popularity, and danceability are the four most important variables for predicting a song with explicit content. Our initial hypothesis was slightly correct. I would guess that key does not appear because the size of the dataset means there's still a massive difference between non-explicit and explicit songs regardless of the specific chord.
+
+
+PLOTTED TREE
+
+```{r, echo=FALSE}
+rpart.plot(explicit_tree_gini, type =4, extra = 101)
+```
+
+The decision tree firsts uses speechiness to differentiate between the two categories. If the speechiness is less than 0.14, the song is automatically classified as non-explicit, otherwise, the tree moves on to the second step, which uses decade. If the decade of the song is the 1970s or 1980s, the song is immediately non-explicit, otherwise the model proceeds to the third step, which again uses speechiness. If the speechiness is above 0.23, the song is classified as explicit, otherwise the model proceeds to its fourth and final step, which is determined by danceability. If the danceability metric is below 0.67, the song is non-explicit, otherwise it is classified as explicit.
+
+PLOTTED CP
+
+```{r, echo=FALSE}
+plotcp(explicit_tree_gini, upper="splits") #4 splits ideal?
+```
+
+Based on the above plot, it appears that four splits is the ideal amount for this model. Our tree above does indeed have four splits.
+
+CP TABLE
+
+```{r, echo=FALSE}
+#the lowest level where the rel_error + xstd < xerror**. For this tree, based on the generated table, this would be at a level of 1 split.
+cptable_explicit <- as.data.frame(explicit_tree_gini$cptable, )
+cptable_explicit$opt <- cptable_explicit$`rel error`+ cptable_explicit$xstd
+kable(cptable_explicit) #4 splits ideal from the graph
+ 
+```
+
+The CP Table confirms the above result that four splits reduces the relative error by a greater margin than 0 and 2.
+
+
+#### Evaluating Model
+
+##### Predicting Values
+
+Now, we will try to determine the optimal model at predicting explicit songs. We will accomplish this by producing a fitted model using the type "class." Then we will compare the actual results to the predicted ones to determine accuracy
+
+```{r, echo=FALSE}
+explicit_fitted_model = predict(explicit_tree_gini, type= "class")
+```
+
+**ACTUAL SPLIT**
+
+```{r, echo=FALSE}
+table(explicit_dataset$explicit)
+```
+
+**PREDICTED SPLIT**
+
+```{r, echo=FALSE}
+table(explicit_fitted_model)
+```
+
+**CONFUSION MATRIX**
+
+```{r, echo=FALSE}
+explicit_conf_matrix = confusionMatrix(as.factor(explicit_fitted_model), as.factor(explicit_dataset$explicit), positive = "explicit", dnn=c("Prediction", "Actual"), mode = "sens_spec")
+explicit_conf_matrix
+#TP/(TP + FP)
+prec = 5663/(5663+ 2991)
+recall =  0.47592
+f1 = 2*(prec*recall/(prec+recall)) #0.5510615
+#DETECTION AND ERROR RATE
+explicit_error_rate = (2991+6236) / (2991+6236+86311+5663) #9.117%
+#Detection Rate is the rate at which the algo detects the possitive class in proportion to the entire classification A/(A+B+C+D) where A is poss poss
+explicit_detection_rate = 5663/(2991+6236+86311+5663) #5.596%
+#perfect classifier would have detection rate of 
+sum(explicit_dataset$explicit=="explicit")/length(explicit_dataset$explicit) #11.76%
+```
+
+The confusion matrix above tells us that the overall accuracy of our model is 90.88%, which is pretty good, especially for a dataset of this magnitude. The f1 score, which considers the precision (true positive rate) and recall (Sensitivity rating) is 0.55, which is also a pretty good result. The detection rate,the rate at which the algorithm detects the positive class in proportion to the entire classification [A/(A+B+C+D) where A is true positives] is 0.056. The final value that we calculated depicts the ideal detection rate for a perfectly accurate model, with is 0.118%.
+
+
+
+
+###ROC
+
+```{r, echo=FALSE}
+explicit_roc <- roc(explicit_dataset$explicit, as.numeric(explicit_fitted_model), plot = TRUE) #Building the evaluation ROC and AUV using the predicted and original target vairables 
+explicit_roc #AUC = 0.7212
+```
+
+The ROC value is another metric which depicts the accuracy of our model. As we can see from the above calculation, the area under the curve (or AUC) value for our predicted model is 0.7212, which is pretty good but could definitely be improved. Let's change the thresholds and run a random forest to see if we can create an optimal model.
+
+
+### Changing thresholds
+```{r, echo=FALSE}
+explicit_fitted_prob = predict(explicit_tree_gini, type= "prob")
+adjust_thres_explicit <- function(x, y, z) {
+  #x=pred_probablities, y=threshold, z=test_outcome
+  thres <- as.factor(ifelse(x > y, "explicit","no explicit"))
+  confusionMatrix(thres, z, positive = "explicit", dnn=c("Prediction", "Actual"), mode = "everything")
+}
+adjust_thres_explicit(explicit_fitted_prob[,'explicit'], .8, as.factor(explicit_dataset$explicit))
+threshold = c(.2, .4, .6)
+accuracy = c(0.9029, 0.9088, 0.9055)
+tpr = c(0.53097, 0.47592, 0.35633)
+fpr = c(1-0.95243, 1-0.96651, 1-0.97867)
+kappa = c(0.5081, 0.5017, 0.4238)
+f1 = c(0.56247, 0.55106,0.46996)
+explicit_thresholds = cbind(threshold, accuracy, tpr, fpr, kappa, f1)
+kable(as.data.frame(explicit_thresholds))
+```
+It appears like 0.2 is the ideal threshold for this model, as it has the highest TPR and f1 values. Now we can set up our Random Forest.
+
+
+
+### Random Forest
+
+#### Testing and Training Data
+
+The dataset will be split 90/10 training and testing.
+
+```{r, echo=FALSE}
+sample_rows = 1:nrow(explicit_dataset)
+set.seed(10271999) #sample(x, size, replace = FALSE, prob = NULL)
+test_rows = sample(sample_rows,
+                   dim(explicit_dataset)[1]*.10, #start with 10% of our dataset, could do 20%
+                   # but random forest does require more training data because of the 
+                   # sampling so 90% might be a better approach with this small of a dataset
+                   replace = FALSE)# We don't want duplicate samples
+explicit_train = explicit_dataset[-test_rows,]
+explicit_test = explicit_dataset[test_rows,]
+```
+
+#### Mtry level
+
+The Mtry level is the number of variables randomly sampled as candidates at each split. The default number for classification is sqrt(# of variables).
+
+```{r, echo=FALSE}
+#general rule to start with the mytry value is square root of the predictors
+mytry_tune <- function(x){
+  xx <- dim(x)[2]-1
+  sqrt(xx)
+}
+       
+mytry_tune(explicit_dataset) #3.6, round to 4
+```
+
+#### Random Forest - 500 Trees
+
+Initially, we will be generating a random forest made up of 500 trees, and an mtry of 4. In order to ensure that these trees are not all identical and have the opportunity to specialize in different subsets of the data, we will set the argument of replace to TRUE.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#set.seed(10271999)	
+explicit_RF_500 = randomForest(explicit~.,          
+                            explicit_train,     
+                            ntree = 500,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 4,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = TRUE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+explicit_RF_500
+```
+
+#### Evaluating Model
+
+**ACCURACY**
+
+```{r, echo=FALSE}
+explicit_RF_500_acc = sum(explicit_RF_500$confusion[row(explicit_RF_500$confusion) == 
+                                                col(explicit_RF_500$confusion)]) / 
+  sum(explicit_RF_500$confusion)
+#0.9058566
+```
+
+The overall accuracy of our 500 tree model is about 90.5%, which is pretty good but not much better than our initial model.
+
+ACTUAL AND PREDICTED
+
+```{r, echo=FALSE}
+table(explicit_train$explicit)
+table(explicit_RF_500$predicted)
+```
+
+IMPORTANT VARIABLES
+
+```{r, echo=FALSE}
+kable(as.data.frame(explicit_RF_500$importance))
+varImpPlot(explicit_RF_500,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for If a Song is Explicit, 500 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+```
+
+DATA VISUALIZATION
+
+```{r, echo=FALSE}
+explicit_RF_500_error = data.frame(1:nrow(explicit_RF_500$err.rate),
+                                explicit_RF_500$err.rate)
+colnames(explicit_RF_500_error) = c("Number of Trees", "Out of the Box",
+                                 "no explicit", "explicit")
+explicit_RF_500_error$Diff <- explicit_RF_500_error$explicit-explicit_RF_500_error$`no explicit`
+datatable(explicit_RF_500_error)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#diff measure is diff between popular and not popular 
+#x is number of trees
+#y is oob error
+fig3 <- plot_ly(x=explicit_RF_500_error$`Number of Trees`, y=explicit_RF_500_error$Diff,name="Diff", type = 'scatter', mode = 'lines')
+fig3 <- fig3 %>% add_trace(y=explicit_RF_500_error$`Out of the Box`, name="OOB_Er")
+fig3 <- fig3 %>% add_trace(y=explicit_RF_500_error$`no explicit`, name="no explicit")
+fig3 <- fig3 %>% add_trace(y=explicit_RF_500_error$explicit, name="explicit")
+fig3
+```
+
+CONFUSION MATRIX
+
+```{r, echo=FALSE}
+explicit_RF_500$confusion
+```
+
+ERROR TABLE
+
+```{r, echo=FALSE}
+datatable(explicit_RF_500_error)
+err.rate <- as.data.frame(explicit_RF_500$err.rate)
+datatable(err.rate)
+```
+
+Looking at this error table, we can see a few interesting values pop out immediately, most notably 248, which has the among the lowest Out of Box (OOB) and Popular Error. Thus we will pick this value to run our optimal tree. 
+
+
+#### 248 Trees, Lowest OOB and Popular Error
+
+```{r, echo=FALSE}
+set.seed(10271999)	
+explicit_RF_248 = randomForest(explicit~.,          
+                            explicit_train,     
+                            ntree = 248,        #<- Number of trees to grow. This should not be set to too small a number, to ensure that every input row gets classified at least a few times.
+                            mtry = 4,            #<- Number of variables randomly sampled as candidates at each split. 
+                            replace = TRUE,      #<- Should sampled data points be replaced.
+                            sampsize = 100,      #<- Size of sample to draw each time.
+                            nodesize = 5,        #<- Minimum numbers of data points in terminal nodes.
+                            importance = TRUE,   #<- Should importance of predictors be assessed?
+                            proximity = FALSE,    #<- Should a proximity measure between rows be calculated?
+                            norm.votes = TRUE,   #<- If TRUE (default), the final result of votes are expressed as fractions. If FALSE, raw vote counts are returned (useful for combining results from different runs).
+                            do.trace = TRUE,     #<- If set to TRUE, give a more verbose output as randomForest is run.
+                            keep.forest = TRUE,  #<- If set to FALSE, the forest will not be retained in the output object. If xtest is given, defaults to FALSE.
+                            keep.inbag = TRUE)   #<- Should an n by ntree matrix be returned that keeps track of which samples are in-bag in which trees? 
+explicit_RF_248
+```
+
+
+
+```{r, echo=FALSE}
+explicit_RF_248_acc = sum(explicit_RF_248$confusion[row(explicit_RF_248$confusion) == 
+                                                col(explicit_RF_248$confusion)]) / 
+  sum(explicit_RF_248$confusion)
+#0.9079429
+```
+
+
+We can see from our accuracy metric that this tree has an overall accuracy rate of 90.79%, which is only marginally higher than our 500 tree model was. Let's compare our two models further.
+
+
+#### Comparing Random Forests
+
+
+```{r, echo=FALSE}
+table(explicit_train$explicit)
+table(explicit_RF_500$predicted)
+table(explicit_RF_248$predicted)
+```
+
+Both variable importance plots are displayed, the first for the 500 tree model, the second for the 248 tree model. 
+
+```{r, echo=FALSE}
+varImpPlot(explicit_RF_500,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for an Explicit Song, 500 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+varImpPlot(explicit_RF_248,     #<- the randomForest model to use
+           sort = TRUE,        #<- whether to sort variables by decreasing order of importance
+           n.var = 10,        #<- number of variables to display
+           main = "Important Factors for an Explicit Song, 248 Trees",
+           #cex = 2,           #<- size of characters or symbols
+           bg = "white",       #<- background color for the plot
+           color = "blue",     #<- color to use for the points and labels
+           lcolor = "orange")  #<- color to use for the horizontal lines
+```
+
+In both the meanDecreaseAccuracy and meanDecreaseGini categories, speechiness is far and away the most important variable in identifying explicit songs, followed by danceability, popularity, and decade. Key is also important for meanDecreaseGini, which further supports the initial hypothesis made at the beginning.
+
+VISUALIZATION OF ERROR 248
+
+```{r, echo=FALSE}
+explicit_RF_248_error = data.frame(1:nrow(explicit_RF_248$err.rate),
+                                explicit_RF_248$err.rate)
+colnames(explicit_RF_248_error) = c("Number of Trees", "Out of the Box",
+                                 "no explicit", "explicit")
+explicit_RF_248_error$Diff <- explicit_RF_248_error$explicit-explicit_RF_248_error$`no explicit`
+fig4 <- plot_ly(x=explicit_RF_248_error$`Number of Trees`, y=explicit_RF_248_error$Diff,name="Diff", type = 'scatter', mode = 'lines')
+fig4 <- fig4 %>% add_trace(y=explicit_RF_248_error$`Out of the Box`, name="OOB_Er")
+fig4 <- fig4 %>% add_trace(y=explicit_RF_248_error$`no explicit`, name="no explicit")
+fig4 <- fig4 %>% add_trace(y=explicit_RF_248_error$explicit, name="explicit")
+fig4
+```
+
+CONFUSION MATRICES
+
+A confusion matrix for the 500 trees is displayed first, then one for 248 trees.
+
+```{r, echo=FALSE}
+explicit_RF_500$confusion
+explicit_RF_248$confusion
+```
+
+#### Predictions on Test Data
+
+WITH 248 TREES
+
+```{r, echo=FALSE}
+explicit_predict = predict(explicit_RF_248,      #<- a randomForest model
+                            explicit_test,      #<- the test data set to use
+                            type = "response",   #<- what results to produce, see the help menu for the options
+                            predict.all = TRUE,  #<- should the predictions of all trees be kept?
+                            proximity = TRUE)    #<- should proximity measures be computed
+#=================================================================================
+#### Error rate on the test set ####
+# Let's create a summary data frame, basically adding the prediction to the test set. 
+explicit_test_pred = data.frame(explicit_test, 
+                                 Prediction = explicit_predict$predicted$aggregate)
+confusionMatrix(explicit_test_pred$Prediction,explicit_test_pred$explicit,positive = "explicit", 
+                dnn=c("Prediction", "Actual"), mode = "everything")
+```
+
+#### Tuning Model
+
+Using the tuneRf function, we are now checking for the optimal number of variables to use/test during the tree building process. 
+
+```{r, echo=FALSE}
+explicit_RF_mtry = tuneRF(explicit_train[ ,c(1:5, 7:15)], 
+                           as.factor(explicit_train$explicit),  
+                           mtryStart = 5,                        
+                           ntreeTry = 248,                       
+                           stepFactor = 2,                       
+                           improve = 0.05,                       
+                           trace = FALSE,                        
+                           plot = FALSE,                         
+                           doBest = FALSE)                       
+explicit_RF_mtry #10 is the lowest but really not by a lot
+```
+
+The tuneRF results show the 10 is probably the best mTry value to test, however not by a very large margin.
+
+### Conclusions
+
+Through this process, we have identified several important quantifiers for classifying explicit songs without doing any lyric analysis. We can sufficiently conclude that Speechiness is the most important variable in identifying explicit music, as the importance metric of the random forests show. In addition, danceability, key, and popularity are also important variables to consider. 
+
+## What Makes a Song Possess High or Low Valence?
+
+The final part of the dataset that we will consider consists of the factors that qualify a song as possessing high or low valence. 
+
+### Exploratory Analysis
+
+#### Correlation between Quantitative Variables
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#not using variables year, artists, id, name, release_date
+corrmatrix = cor(spotify[,c("valence", "acousticness", "danceability", "duration_ms", "energy", "instrumentalness", "liveness", "loudness", "speechiness","tempo", "year")])
+kable(round(corrmatrix, 4))
+```
+From this table we will remove acousticness because of it's extremely low correlation with energy. 
+
+
+```{r, echo=FALSE}
+#correlation, remove acousticness become -0.7079 correlation with energy
+valence_dataset = spotify[, -c(3, 4, 9, 15, 17)]
+```
+
+#### Summary Statistics
+
+The dataset will be divided into three categories: a >0.6 valence value will be considered as "happy/cheerful", 0.4 to 0.6 as "neutral" and less than 04 as "sad/depressed." The results for each decade are displayed below:
+
+```{r, echo=FALSE}
+#number of explicit vs not explicit
+table(valence_dataset$valence_fact)
+#base rate for happy: 42.99%, classify above this
+(sum(valence_dataset$valence_fact=="happy/cheerful")/length(valence_dataset$valence_fact))*100
+#base rate for neutral: 34.93%, classify above this
+(sum(valence_dataset$valence_fact=="neutral")/length(valence_dataset$valence_fact))*100
+#base rate for sad: 22.07%, classify above this
+(sum(valence_dataset$valence_fact=="sad/depressed")/length(valence_dataset$valence_fact))*100
+#number of explicit vs not explicit separately by decade song is from
+kable(valence_dataset %>% group_by(decade, valence_fact) %>% summarise(count =
+                                              n()))
+```
+
+#### Data Visualizations
+
+```{r, echo=FALSE}
+#NEED TO ADD TITLES TO THESE THINGS
+#boxplot valence vs energy
+ggplot(valence_dataset, aes(x=valence_fact, y=energy)) + geom_boxplot()
+#boxplot valence vs tempo
+ggplot(valence_dataset, aes(x=valence_fact, y=tempo)) + geom_boxplot()
+#boxplot valence vs popularity score
+ggplot(valence_dataset, aes(x=valence_fact, y=popularity)) + geom_boxplot()
+#more prevalent key
+ggplot(valence_dataset, aes(x=key)) + geom_bar() + facet_wrap(~valence_fact, scales="free_x") + coord_flip()
+#number of valence songs by decade
+ggplot(valence_dataset, aes(x=decade, fill=valence_fact)) + geom_bar(position=position_dodge())
+```
+
+As we would initially expect, happy songs tend to have the highest energy level, followed by neutral and sad. The tempo of the three categories all tend to hover between 100 and 125, and the popularity between 37 and 50, without a real statistically significant difference. In terms of key, the graphs look pretty much the exact same across all three categories. Finally, the bar graph shows a rise in "neutral" and "sad" songs in recent decades, whereas the amount of happy songs has gradually decreased over time. 
+
+
+#### Selecting Important Variables
+
+```{r, echo=FALSE}
+#dont use bc factors is_popular, valence,explicit, key, mode, decade
+#dont use bc no differences across 3 categories duration, instrumentalness, liveness, speechiness, tempo
+valence_dataset = valence_dataset %>% select(c(2, 3, 5, 10, 12, 17))
+valence_dataset[, c("year", "danceability", "energy", "loudness", "popularity")] <- lapply(valence_dataset[, c("year", "danceability", "energy", "loudness", "popularity")],function(x) scale(x))
+```
+
+Instead of a random forest, we will use a kNN/k-means model to determine the valence of a song using its k-nearest neighbors. 
+
+### kNN/k-Means
+
+#### Training/Testing Data
+
+For our algorithm, we have decided to do a 90/10 split of the data for training and testing.
+
+```{r, echo=FALSE}
+index = round(0.9 * nrow(valence_dataset), 0)
+```
+
+
+```{r, echo=FALSE}
+set.seed(10271999)
+valence_train_rows = sample(1:nrow(valence_dataset),
+                              index,
+                              replace = FALSE)
+valence_train = valence_dataset[valence_train_rows,]
+valence_test = valence_dataset[-valence_train_rows,]
+#90% training
+nrow(valence_train)/nrow(valence_dataset)
+#10% testing
+nrow(valence_test)/nrow(valence_dataset)
+```
+
+##### 3NN
+
+The first section of our model will be a 3-nearest neighbors model, using the above 90/10 train/test split.
+
+```{r, echo=FALSE}
+#9 Train the classifier using k = 3, remember to set.seed so you can repeat the output and to use the labels as a vector for the class (not a index of the dataframe)
+set.seed(10271999)
+valence_3NN <-  knn(train = valence_train[, 1:5],
+               test = valence_test[, 1:5],    
+               cl = valence_train$valence_fact,
+               k = 3,
+               use.all = TRUE,
+               prob = TRUE)
+```
+
+#### Evaluating Model
+
+**CONFUSION MATRIX & ACCURACY**
+
+```{r,echo=FALSE}
+CrossTable(valence_test$valence_fact, valence_3NN, prop.chisq = FALSE)
+conf_mat = table(valence_3NN, valence_test$valence_fact)
+  
+accu = sum(conf_mat[row(conf_mat) == col(conf_mat)]) / sum(conf_mat)
+#54.72% accuracy
+```
+
+Our 3-NN model resulted in an overall accuracy rate of 54.72%, which isn't very good considering the breadth of the dataset. Let's see if we can determine an optimal k-value that will better increase the overall accuracy of our prediction:
+
+
+**CHOOSING OPTIMAL K**
+
+```{r, echo=FALSE}
+chooseK = function(k, train_set, val_set, train_class, val_class){
+  
+  # Build knn with k neighbors considered.
+  set.seed(10271999)
+  class_knn = knn(train = train_set,    #<- training set cases
+                  test = val_set,       #<- test set cases
+                  cl = train_class,     #<- category for classification
+                  k = k,                #<- number of neighbors considered
+                  use.all = TRUE)       #<- control ties between class assignments
+                                        #   If true, all distances equal to the kth largest are included
+  conf_mat = table(class_knn, val_class)
+  
+  # Calculate the accuracy.
+  accu = sum(conf_mat[row(conf_mat) == col(conf_mat)]) / sum(conf_mat)                         
+  cbind(k = k, accuracy = accu)
+}
+#should select K based on TPF not off of accuracy
+#odd numbers breaks ties between neighbor classifications
+knn_different_k = sapply(seq(1, 21, by = 2),  #<- set k to be odd number from 1 to 21
+                         function(x) chooseK(x, 
+                                             train_set = valence_train[, 1:5],
+                                             val_set = valence_test[, 1:5],
+                                             train_class = valence_train$valence_fact,
+                                             val_class = valence_test$valence_fact))
+```
+
+```{r, echo=FALSE}
+#16 Create a dataframe so we can visualize the difference in accuracy based on K, convert the matrix to a dataframe
+knn_different_k = data.frame(k = knn_different_k[1,],
+                             accuracy = knn_different_k[2,])
+knn_different_k
+```
+
+Looking at the above dataframe, the overall accuracy of the model gradually increases with a higher choice of k, culminating with a value around 59.6% for a 21-NN model. However, the difference in accuracy begins to flatten out around 6 nearest neighbors, so this is what we will pick for our optimized model.
+
+
+
+```{r, echo=FALSE}
+#17 Use ggplot to show the output and comment on the k to select
+ggplot(knn_different_k,
+       aes(x = k, y = accuracy)) +
+  geom_line(color = "orange", size = 1.5) +
+  geom_point(size = 3)
+#NOT SUPPER HUGE DIFF AFTER 6 KNN
+```
+
+
+
+
+##### 6NN
+
+```{r, echo=FALSE}
+#9 Train the classifier using k = 3, remember to set.seed so you can repeat the output and to use the labels as a vector for the class (not a index of the dataframe)
+set.seed(10271999)
+valence_6NN <-  knn(train = valence_train[, 1:5],
+               test = valence_test[, 1:5],    
+               cl = valence_train$valence_fact,
+               k = 6,
+               use.all = TRUE,
+               prob = TRUE)
+```
+
+#### Evaluating Model
+
+CONFUSION MATRIX & ACCURACY
+
+```{r,echo=FALSE}
+CrossTable(valence_test$valence_fact, valence_6NN, prop.chisq = FALSE)
+conf_mat2 = table(valence_6NN, valence_test$valence_fact)
+  
+accu2 = sum(conf_mat2[row(conf_mat2) == col(conf_mat2)]) / sum(conf_mat2)
+#57.12% accuracy
+```
+
+The overall accuracy of our model slightly increased to 57.12% here, indicating that a 6-NN model would probably be preferred to our 3-NN one. The 6-NN model was also marginally better in each category at predicting the correct outcome. Further testing might be needed to further optimize this model for an even greater accuracy.
+
+
+### Conclusions
+
+The k-NN/k-Means model may not be the best method to use when trying to determine song valence. Compared to the first two random forests (which had overall accuracy rates in the low 90s), this model wasn't much better than randomly guessing. The algorithm correctly outputted the valence of a song only 57.12% of the time, which indicates that it is definitely not good enough for use in any analytics setting.
+
+## Future Work
+
+
+In the future, the random forest models could be implemented on individual user data, to determine what their preferred music taste is, and recommend suggestions based on their likes and dislikes. In addition, artists, music engineers and record labels could use our popularity model to determine the best formulas for creating hit songs to maximize their profit and increase listener count. Our explicit content random forest could be a part of a parental controls filter, which prevents children from discovering and listening to explicit music on certain platforms. 
+
